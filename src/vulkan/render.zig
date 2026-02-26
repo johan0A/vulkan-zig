@@ -2000,7 +2000,8 @@ const Renderer = struct {
         try self.renderWrapperPrototype(name, command, returns, "", .wrapper);
 
         if (returns.len == 1 and returns[0].origin == .inner_return_value) {
-            try self.writer.writeAll("{\n\n");
+            try self.writer.writeAll("{\n");
+            try self.renderSliceLenAsserts(command.params);
 
             if (returns_vk_result) {
                 try self.writer.writeAll("const result = ");
@@ -2015,7 +2016,7 @@ const Renderer = struct {
                 try self.writer.writeAll(";\n");
             }
 
-            try self.writer.writeAll("\n}\n");
+            try self.writer.writeAll("}\n");
             return;
         }
 
@@ -2025,6 +2026,8 @@ const Renderer = struct {
             "return_values";
 
         try self.writer.writeAll("{\n");
+        try self.renderSliceLenAsserts(command.params);
+
         if (returns.len == 1) {
             try self.writer.writeAll("var ");
             try self.writeIdentifierWithCase(.snake, return_var_name);
@@ -2139,6 +2142,7 @@ const Renderer = struct {
         try self.renderAllocWrapperPrototype(name, params, returns_vk_result, data_type, "", .wrapper);
 
         try self.writer.writeAll("{\n");
+        try self.renderSliceLenAsserts(params);
         try self.writer.writeAll("    var count: ");
         try self.renderTypeInfo(count_type);
         try self.writer.writeAll(" = undefined;\n");
@@ -2320,6 +2324,31 @@ const Renderer = struct {
         } else {
             try self.renderParamName(slice_param.name);
             try self.writer.writeAll(".len");
+        }
+    }
+
+    fn renderSliceLenAsserts(self: *Self, params: []const reg.Command.Param) !void {
+        for (params) |param| {
+            if ((try self.classifyParam(params, param)) != .buffer_len) continue;
+            if ((try self.findSliceParamForLen(params, param.name)) == null) continue;
+
+            var first: ?reg.Command.Param = null;
+            for (params) |p| {
+                if ((try self.classifyParam(params, p)) != .slice) continue;
+                if (!mem.eql(u8, p.param_type.pointer.size.other_field, param.name)) continue;
+                // Can't access .len directly on ?[]const T
+                if (p.param_type.pointer.is_optional and try self.isPlainSlice(params, p)) continue;
+
+                if (first) |f| {
+                    try self.writer.writeAll("std.debug.assert(");
+                    try self.renderParamName(f.name);
+                    try self.writer.writeAll(".len == ");
+                    try self.renderParamName(p.name);
+                    try self.writer.writeAll(".len);\n");
+                } else {
+                    first = p;
+                }
+            }
         }
     }
 };
