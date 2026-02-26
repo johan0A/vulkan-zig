@@ -6,7 +6,7 @@ A Vulkan binding generator for Zig.
 
 ## Overview
 
-vulkan-zig attempts to provide a better experience to programming Vulkan applications in Zig, by providing features such as integration of vulkan errors with Zig's error system, function pointer loading, renaming fields to standard Zig style, better bitfield handling, turning out parameters into return values and more.
+vulkan-zig attempts to provide a better experience to programming Vulkan applications in Zig, by providing features such as integration of vulkan errors with Zig's error system, function pointer loading, renaming fields to standard Zig style, better bitfield handling, turning out parameters into return values, slices for buffer parameters and more.
 
 vulkan-zig is automatically tested daily against the latest vk.xml and zig, and supports vk.xml from version 1.x.163.
 
@@ -171,7 +171,31 @@ Wrappers are generated according to the following rules:
   * If there are multiple return values selected, an additional struct is generated. The original call's return value is called `return_value`, `VkResult` is named `result`, and the out parameters are called the same except `p_` is removed. They are generated in this order.
 * Any const non-optional single-item pointer is interpreted as an in-parameter. For these, one level of indirection is removed so that create info structure pointers can now be passed as values, enabling the ability to use struct literals for these parameters.
 * Error codes are translated into Zig errors.
-* As of yet, there is no specific handling of enumeration style commands or other commands which accept slices.
+* Buffer pointer parameters that have an associated length parameter are combined into a typed `Slice`. The length parameter is removed from the wrapper signature. See [Typed Slices](#typed-slices) for details.
+
+#### Typed Slices
+
+When a Vulkan command takes a pointer and a separate count/length parameter, the wrapper combines them into a `Slice(PointerType, LenType)`. This preserves the exact type of the length parameter from the Vulkan specification (typically `u32`).
+
+```zig
+pub fn Slice(comptime PointerType: type, comptime LenType: type) type
+```
+
+When multiple slice parameters share the same length parameter, a debug assertion is generated to verify that their lengths match.
+
+This conversion only applies to commands where the length is a plain integer parameter. Enumeration-style commands are not affected.
+
+To construct a `Slice` from a standard Zig slice:
+```zig
+const buffers: []const vk.Buffer = &.{ buffer_a, buffer_b };
+const offsets: []const vk.DeviceSize = &.{ 0, 256 };
+vkd.cmdBindVertexBuffers(
+    cmd_buf,
+    0,
+    .fromSlice(buffers),
+    .fromSlice(offsets),
+);
+```
 
 #### Initializing Wrappers
 
