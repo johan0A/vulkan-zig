@@ -112,6 +112,7 @@ const preamble =
     \\        ptr: Ptr,
     \\        len: LenT,
     \\
+    \\        pub const @"null" = if (is_opt) @This(){ .len = 0, .ptr = null } else {};
     \\        pub const SliceT = if (is_opt) ?NonOptSlice else NonOptSlice;
     \\
     \\        pub fn fromSlice(slice: SliceT) @This() {
