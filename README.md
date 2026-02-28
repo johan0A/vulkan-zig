@@ -41,7 +41,7 @@ $ zig fetch --save git+https://github.com/Snektron/vulkan-zig
 ```
 And then in your build.zig file, you'll need to add a line like this to your build function:
 ```zig
-const vulkan = b.dependency("vulkan_zig", .{
+const vulkan = b.dependency("vulkan", .{
     .registry = b.path("path/to/vk.xml"),
 }).module("vulkan-zig");
 exe.root_module.addImport("vulkan", vulkan);
@@ -55,7 +55,7 @@ Bindings can be generated directly from the Vulkan-Headers repository by adding 
 $ zig fetch --save=vulkan_headers git+https://github.com/KhronosGroup/Vulkan-Headers
 ```
 ```zig
-const vulkan = b.dependency("vulkan_zig", .{
+const vulkan = b.dependency("vulkan", .{
     .registry = b.dependency("vulkan_headers", .{}).path("registry/vk.xml"),
 }).module("vulkan-zig");
 exe.root_module.addImport("vulkan", vulkan);
@@ -73,7 +73,7 @@ And then pass `vk.xml` to vulkan-zig-generator as follows:
 // Get the (lazy) path to vk.xml:
 const registry = b.dependency("vulkan_headers", .{}).path("registry/vk.xml");
 // Get generator executable reference
-const vk_gen = b.dependency("vulkan_zig", .{}).artifact("vulkan-zig-generator");
+const vk_gen = b.dependency("vulkan", .{}).artifact("vulkan-zig-generator");
 // Set up a run step to generate the bindings
 const vk_generate_cmd = b.addRunArtifact(vk_gen);
 // Pass the registry to the generator
@@ -344,7 +344,7 @@ For more advanced shader compiler usage, one may consider a library such as [sha
 Vulkan-zig also supports generating Vulkan Video bindings. To do this, one additionally pass `--video <video.xml>` to the generator, or pass `-Dvideo=<video.xml>` to build.zig. If using vulkan-zig via the Zig package manager, the following also works:
 ```zig
 const vulkan_headers = b.dependency("vulkan_headers");
-const vulkan = b.dependency("vulkan_zig", .{
+const vulkan = b.dependency("vulkan", .{
     .registry = vulkan_headers.path("registry/vk.xml"),
     .video = vulkan_headers.path("registery/video.xml"),
 }).module("vulkan-zig");
