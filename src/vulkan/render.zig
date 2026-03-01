@@ -96,44 +96,6 @@ const preamble =
     \\    name: [:0]const u8 = "custom",
     \\    version: Version = makeApiVersion(0, 0, 0, 0),
     \\};
-    \\pub fn Slice(comptime Ptr: type, comptime LenT: type) type {
-    \\    const info = @typeInfo(Ptr);
-    \\    const ptr_info = switch (info) {
-    \\        .pointer => info.pointer,
-    \\        .optional => @typeInfo(info.optional.child).pointer,
-    \\        else => @compileError("expected pointer or optional pointer"),
-    \\    };
-    \\    const is_opt = switch (info) {
-    \\        .optional => true,
-    \\        else => false,
-    \\    };
-    \\    const NonOptSlice = if (ptr_info.is_const) []const ptr_info.child else []ptr_info.child;
-    \\    return struct {
-    \\        ptr: Ptr,
-    \\        len: LenT,
-    \\
-    \\        pub const @"null" = if (is_opt) @This(){ .len = 0, .ptr = null } else {};
-    \\        pub const SliceT = if (is_opt) ?NonOptSlice else NonOptSlice;
-    \\
-    \\        pub fn fromSlice(slice: SliceT) @This() {
-    \\            if (is_opt) {
-    \\                if (slice) |s| {
-    \\                    return .{ .ptr = s.ptr, .len = @intCast(s.len) };
-    \\                }
-    \\                return .{ .ptr = null, .len = 0 };
-    \\            }
-    \\            return .{ .ptr = slice.ptr, .len = @intCast(slice.len) };
-    \\        }
-    \\
-    \\        pub fn toSlice(self: @This()) SliceT {
-    \\            if (is_opt) {
-    \\                const p = self.ptr orelse return null;
-    \\                return p[0..@intCast(self.len)];
-    \\            }
-    \\            return self.ptr[0..@intCast(self.len)];
-    \\        }
-    \\    };
-    \\}
 ;
 
 // Keep in sync with above definition of FlagsMixin
@@ -1691,28 +1653,7 @@ const Renderer = struct {
         );
         try self.writeIdentifierWithCase(.camel, trimVkNamespace(name));
         try self.writer.writeByte('(');
-
-        for (command.params) |param| {
-            switch (try self.classifyParam(command.params, param)) {
-                .out_pointer => continue,
-                .buffer_len => {
-                    if ((try self.findSliceParamForLen(command.params, param.name)) != null) {
-                        continue;
-                    }
-                    try self.renderParamName(param.name);
-                },
-                .dispatch_handle => {
-                    if (mem.eql(u8, param.param_type.name, dispatch_handle)) {
-                        try self.writer.writeAll("self.handle");
-                    } else {
-                        try self.renderParamName(param.name);
-                    }
-                },
-                else => try self.renderParamName(param.name),
-            }
-            try self.writer.writeAll(", ");
-        }
-
+        try self.renderProxyCallArgs(name, command.params, command.params, dispatch_handle);
         try self.writer.writeAll(
             \\);
             \\}
@@ -1754,12 +1695,26 @@ const Renderer = struct {
         );
         try self.writeIdentifierWithCase(.camel, trimVkNamespace(name));
         try self.writer.writeByte('(');
+        try self.renderProxyCallArgs(wrapped_name, params, command.params, dispatch_handle);
+        try self.writer.writeAll(
+            \\allocator,);
+            \\}
+            \\
+        );
+    }
 
-        for (params) |param| {
-            switch (try self.classifyParam(params, param)) {
-                .out_pointer => return error.InvalidRegistry,
+    fn renderProxyCallArgs(
+        self: *Self,
+        name: []const u8,
+        iter_params: []const reg.Command.Param,
+        params: []const reg.Command.Param,
+        dispatch_handle: []const u8,
+    ) !void {
+        for (iter_params) |param| {
+            switch (try self.classifyParam(iter_params, param)) {
+                .out_pointer => continue,
                 .buffer_len => {
-                    if ((try self.findSliceParamForLen(params, param.name)) != null) {
+                    if (try self.shouldSkipLen(name, params, param)) {
                         continue;
                     }
                     try self.renderParamName(param.name);
@@ -1775,12 +1730,6 @@ const Renderer = struct {
             }
             try self.writer.writeAll(", ");
         }
-
-        try self.writer.writeAll(
-            \\allocator,);
-            \\}
-            \\
-        );
     }
 
     fn derefName(name: []const u8) []const u8 {
@@ -1847,11 +1796,11 @@ const Renderer = struct {
             if (class == .out_pointer) {
                 continue;
             }
-            if (try self.shouldSkipLen(command.params, param)) {
+            if (try self.shouldSkipLen(name, command.params, param)) {
                 continue;
             }
             if (class == .slice) {
-                try self.renderSliceParam(command.params, param);
+                try self.renderSliceParam(param);
             } else {
                 try self.renderWrapperParam(param);
             }
@@ -1896,14 +1845,14 @@ const Renderer = struct {
                     }
                 },
                 .buffer_len => {
-                    if (try self.findSliceParamForLen(command.params, param.name)) |slice_param| {
-                        try self.renderSliceLenCallArg(command.params, slice_param);
-                    } else {
+                    if (!try self.shouldSkipLen(name, command.params, param) or
+                        !try self.renderSliceLenCallArg(param, command.params))
+                    {
                         try self.renderParamName(param.name);
                     }
                 },
                 .slice => {
-                    try self.renderSlicePtrCallArg(command.params, param);
+                    try self.renderSlicePtrCallArg(param);
                 },
                 else => {
                     try self.renderParamName(param.name);
@@ -1934,7 +1883,6 @@ const Renderer = struct {
             if (command.return_type.* != .name or !mem.eql(u8, command.return_type.name, "VkResult")) {
                 return error.InvalidRegistry;
             }
-
             try returns.append(allocator, .{
                 .name = "result",
                 .return_value_type = command.return_type.*,
@@ -2076,18 +2024,18 @@ const Renderer = struct {
         kind: WrapperKind,
     ) !void {
         try self.writer.writeAll("pub fn ");
-        try self.renderWrapperName(name, "", .wrapper);
+        try self.renderWrapperName(name, dispatch_handle, kind);
         try self.writer.writeAll("(self: Self, ");
         for (params) |param| {
             const class = try self.classifyParam(params, param);
             if (kind == .proxy and class == .dispatch_handle and mem.eql(u8, param.param_type.name, dispatch_handle)) {
                 continue;
             }
-            if (try self.shouldSkipLen(params, param)) {
+            if (try self.shouldSkipLen(name, params, param)) {
                 continue;
             }
             if (class == .slice) {
-                try self.renderSliceParam(params, param);
+                try self.renderSliceParam(param);
             } else {
                 try self.renderWrapperParam(param);
             }
@@ -2196,14 +2144,14 @@ const Renderer = struct {
         for (params) |param| {
             switch (try self.classifyParam(params, param)) {
                 .buffer_len => {
-                    if (try self.findSliceParamForLen(params, param.name)) |slice_param| {
-                        try self.renderSliceLenCallArg(params, slice_param);
-                    } else {
+                    if (!try self.shouldSkipLen(wrapped_name, params, param) or
+                        !try self.renderSliceLenCallArg(param, params))
+                    {
                         try self.renderParamName(param.name);
                     }
                 },
                 .slice => {
-                    try self.renderSlicePtrCallArg(params, param);
+                    try self.renderSlicePtrCallArg(param);
                 },
                 else => {
                     try self.renderParamName(param.name);
@@ -2258,55 +2206,41 @@ const Renderer = struct {
         }
     }
 
-    fn findSliceParamForLen(self: Self, params: []const reg.Command.Param, len_name: []const u8) !?reg.Command.Param {
-        for (params) |param| {
-            if ((try self.classifyParam(params, param)) == .slice) {
-                if (mem.eql(u8, param.param_type.pointer.size.other_field, len_name)) {
-                    return param;
-                }
-            }
+    const FindRefSliceParamResult = struct { idx: usize, param: reg.Command.Param };
+    fn findRefSliceParam(self: Self, params: []const reg.Command.Param, len_name: []const u8) !?FindRefSliceParamResult {
+        var result: ?FindRefSliceParamResult = null;
+        for (params, 0..) |param, i| {
+            if ((try self.classifyParam(params, param)) != .slice) continue;
+            if (!mem.eql(u8, param.param_type.pointer.size.other_field, len_name)) continue;
+            result = .{ .idx = i, .param = param };
+            if (!param.param_type.pointer.is_optional) break;
         }
-        return null;
+        return result;
     }
 
-    fn shouldSkipLen(self: Self, params: []const reg.Command.Param, param: reg.Command.Param) !bool {
+    fn shouldSkipLen(self: Self, function_name: []const u8, params: []const reg.Command.Param, param: reg.Command.Param) !bool {
         if ((try self.classifyParam(params, param)) != .buffer_len) return false;
-        return (try self.findSliceParamForLen(params, param.name)) != null;
+        if ((try self.findRefSliceParam(params, param.name)) == null) return false;
+        const skip_set = std.StaticStringMap(void).initComptime(.{
+            .{ "vkCmdBeginTransformFeedbackEXT", {} },
+            .{ "vkCmdEndTransformFeedbackEXT", {} },
+        });
+        return !skip_set.has(function_name);
     }
 
-    fn isPlainSlice(self: Self, params: []const reg.Command.Param, param: reg.Command.Param) !bool {
-        if ((try self.classifyParam(params, param)) != .slice) return false;
-        const len_param = for (params) |p| {
-            if (mem.eql(u8, p.name, param.param_type.pointer.size.other_field)) break p;
-        } else return false;
-        if (len_param.param_type != .name) return false;
-        const zig_name = builtin_types.get(len_param.param_type.name) orelse return false;
-        return mem.eql(u8, zig_name, @typeName(usize));
-    }
-
-    fn renderSliceParam(self: *Self, params: []const reg.Command.Param, param: reg.Command.Param) !void {
+    fn renderSliceParam(self: *Self, param: reg.Command.Param) !void {
         const ptr = param.param_type.pointer;
-        const len_param = for (params) |p| {
-            if (mem.eql(u8, p.name, ptr.size.other_field)) break p;
-        } else return error.InvalidRegistry;
-
         try self.renderParamName(param.name);
-        try self.writer.writeAll(": Slice(");
-        if (ptr.is_optional) {
-            try self.writer.writeByte('?');
-        }
-        try self.writer.writeAll("[*]");
-        if (ptr.is_const) {
-            try self.writer.writeAll("const ");
-        }
+        try self.writer.writeByte(':');
+        if (ptr.is_optional) try self.writer.writeByte('?');
+        try self.writer.writeAll("[]");
+        if (ptr.is_const) try self.writer.writeAll("const ");
         try self.renderTypeInfo(ptr.child.*);
-        try self.writer.writeAll(", ");
-        try self.renderTypeInfo(len_param.param_type);
-        try self.writer.writeAll("), ");
+        try self.writer.writeByte(',');
     }
 
-    fn renderSlicePtrCallArg(self: *Self, params: []const reg.Command.Param, param: reg.Command.Param) !void {
-        if (param.param_type.pointer.is_optional and try self.isPlainSlice(params, param)) {
+    fn renderSlicePtrCallArg(self: *Self, param: reg.Command.Param) !void {
+        if (param.param_type.pointer.is_optional) {
             try self.writer.writeAll("if (");
             try self.renderParamName(param.name);
             try self.writer.writeAll(") |s| s.ptr else null");
@@ -2316,38 +2250,54 @@ const Renderer = struct {
         }
     }
 
-    fn renderSliceLenCallArg(self: *Self, params: []const reg.Command.Param, slice_param: reg.Command.Param) !void {
-        if (slice_param.param_type.pointer.is_optional and try self.isPlainSlice(params, slice_param)) {
-            try self.writer.writeAll("if (");
-            try self.renderParamName(slice_param.name);
-            try self.writer.writeAll(") |s| s.len else 0");
+    fn renderSliceLenCallArg(self: *Self, len_param: reg.Command.Param, params: []const reg.Command.Param) !bool {
+        const ref = (try self.findRefSliceParam(params, len_param.name)) orelse return false;
+
+        try self.writer.writeAll("@intCast(");
+        if (ref.param.param_type.pointer.is_optional) {
+            for (params) |param| {
+                if ((try self.classifyParam(params, param)) != .slice) continue;
+                if (!mem.eql(u8, param.param_type.pointer.size.other_field, len_param.name)) continue;
+                try self.writer.writeAll("if (");
+                try self.renderParamName(param.name);
+                try self.writer.writeAll(") |s| s.len else ");
+            }
+            try self.writer.writeAll("0)");
         } else {
-            try self.renderParamName(slice_param.name);
-            try self.writer.writeAll(".len");
+            try self.renderParamName(ref.param.name);
+            try self.writer.writeAll(".len)");
         }
+        return true;
     }
 
     fn renderSliceLenAsserts(self: *Self, params: []const reg.Command.Param) !void {
-        for (params) |param| {
-            if ((try self.classifyParam(params, param)) != .buffer_len) continue;
-            if ((try self.findSliceParamForLen(params, param.name)) == null) continue;
+        for (params) |len_param| {
+            if ((try self.classifyParam(params, len_param)) != .buffer_len) continue;
+            const ref = (try self.findRefSliceParam(params, len_param.name)) orelse continue;
 
-            var first: ?reg.Command.Param = null;
-            for (params) |p| {
-                if ((try self.classifyParam(params, p)) != .slice) continue;
-                if (!mem.eql(u8, p.param_type.pointer.size.other_field, param.name)) continue;
-                // Can't access .len directly on ?[]const T
-                if (p.param_type.pointer.is_optional and try self.isPlainSlice(params, p)) continue;
+            for (params, 0..) |other, i| {
+                if (i == ref.idx) continue;
+                if ((try self.classifyParam(params, other)) != .slice) continue;
+                if (!mem.eql(u8, other.param_type.pointer.size.other_field, len_param.name)) continue;
 
-                if (first) |f| {
-                    try self.writer.writeAll("std.debug.assert(");
-                    try self.renderParamName(f.name);
-                    try self.writer.writeAll(".len == ");
-                    try self.renderParamName(p.name);
-                    try self.writer.writeAll(".len);\n");
-                } else {
-                    first = p;
+                const ref_opt = ref.param.param_type.pointer.is_optional;
+                const other_opt = other.param_type.pointer.is_optional;
+
+                try self.writer.writeAll("std.debug.assert(");
+                if (ref_opt) {
+                    try self.renderParamName(ref.param.name);
+                    try self.writer.writeAll(" == null or ");
                 }
+                if (other_opt) {
+                    try self.renderParamName(other.name);
+                    try self.writer.writeAll(" == null or ");
+                }
+                try self.renderParamName(ref.param.name);
+                if (ref_opt) try self.writer.writeAll(".?");
+                try self.writer.writeAll(".len == ");
+                try self.renderParamName(other.name);
+                if (other_opt) try self.writer.writeAll(".?");
+                try self.writer.writeAll(".len);\n");
             }
         }
     }
