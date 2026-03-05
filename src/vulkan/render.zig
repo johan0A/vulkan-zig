@@ -2028,6 +2028,7 @@ const Renderer = struct {
         try self.writer.writeAll("(self: Self, ");
         for (params) |param| {
             const class = try self.classifyParam(params, param);
+            // Skip the dispatch type for proxying wrappers
             if (kind == .proxy and class == .dispatch_handle and mem.eql(u8, param.param_type.name, dispatch_handle)) {
                 continue;
             }
@@ -2206,13 +2207,12 @@ const Renderer = struct {
         }
     }
 
-    const FindRefSliceParamResult = struct { idx: usize, param: reg.Command.Param };
-    fn findRefSliceParam(self: Self, params: []const reg.Command.Param, len_name: []const u8) !?FindRefSliceParamResult {
-        var result: ?FindRefSliceParamResult = null;
-        for (params, 0..) |param, i| {
+    fn findRefSliceParam(self: Self, params: []const reg.Command.Param, len_name: []const u8) !?reg.Command.Param {
+        var result: ?reg.Command.Param = null;
+        for (params) |param| {
             if ((try self.classifyParam(params, param)) != .slice) continue;
             if (!mem.eql(u8, param.param_type.pointer.size.other_field, len_name)) continue;
-            result = .{ .idx = i, .param = param };
+            result = param;
             if (!param.param_type.pointer.is_optional) break;
         }
         return result;
@@ -2251,10 +2251,10 @@ const Renderer = struct {
     }
 
     fn renderSliceLenCallArg(self: *Self, len_param: reg.Command.Param, params: []const reg.Command.Param) !bool {
-        const ref = (try self.findRefSliceParam(params, len_param.name)) orelse return false;
+        const ref_param = (try self.findRefSliceParam(params, len_param.name)) orelse return false;
 
         try self.writer.writeAll("@intCast(");
-        if (ref.param.param_type.pointer.is_optional) {
+        if (ref_param.param_type.pointer.is_optional) {
             for (params) |param| {
                 if ((try self.classifyParam(params, param)) != .slice) continue;
                 if (!mem.eql(u8, param.param_type.pointer.size.other_field, len_param.name)) continue;
@@ -2264,7 +2264,7 @@ const Renderer = struct {
             }
             try self.writer.writeAll("0)");
         } else {
-            try self.renderParamName(ref.param.name);
+            try self.renderParamName(ref_param.name);
             try self.writer.writeAll(".len)");
         }
         return true;
@@ -2276,8 +2276,7 @@ const Renderer = struct {
         for (params) |len_param| {
             if ((try self.classifyParam(params, len_param)) != .buffer_len) continue;
 
-            const ref_result = (try self.findRefSliceParam(params, len_param.name)) orelse continue;
-            const ref_slice = ref_result.param;
+            const ref_slice = (try self.findRefSliceParam(params, len_param.name)) orelse continue;
             const ref_slice_opt = ref_slice.param_type.pointer.is_optional;
             const len_param_kept = !try self.shouldSkipLen(function_name, params, len_param);
 
@@ -2291,21 +2290,10 @@ const Renderer = struct {
 
             for (params) |other| {
                 const other_class = try self.classifyParam(params, other);
-                switch (other_class) {
-                    .slice => {
-                        if (!mem.eql(u8, other.param_type.pointer.size.other_field, len_param.name)) continue;
-                        if (ref_is_slice and mem.eql(u8, other.name, ref_param.name)) continue;
-                    },
-                    .buffer_len => {
-                        if (!mem.eql(u8, other.name, len_param.name)) continue;
-                        if (!ref_is_slice) continue;
-                        if (try self.shouldSkipLen(function_name, params, other)) continue;
-                    },
-                    else => continue,
-                }
-
-                const other_is_slice = other_class == .slice;
-                const other_opt = if (other_is_slice) other.param_type.pointer.is_optional else false;
+                if (other_class != .slice) continue;
+                if (!mem.eql(u8, other.param_type.pointer.size.other_field, len_param.name)) continue;
+                if (ref_is_slice and mem.eql(u8, other.name, ref_param.name)) continue;
+                const other_opt = other.param_type.pointer.is_optional;
 
                 try self.writer.writeAll("std.debug.assert(");
                 if (ref_is_opt) {
@@ -2326,10 +2314,8 @@ const Renderer = struct {
                 try self.writer.writeAll(" == ");
 
                 try self.renderParamName(other.name);
-                if (other_is_slice) {
-                    if (other_opt) try self.writer.writeAll(".?");
-                    try self.writer.writeAll(".len");
-                }
+                if (other_opt) try self.writer.writeAll(".?");
+                try self.writer.writeAll(".len");
 
                 try self.writer.writeAll(");\n");
             }
