@@ -1949,7 +1949,7 @@ const Renderer = struct {
 
         if (returns.len == 1 and returns[0].origin == .inner_return_value) {
             try self.writer.writeAll("{\n");
-            try self.renderSliceLenAsserts(command.params);
+            try self.renderSliceLenAsserts(name, command.params);
 
             if (returns_vk_result) {
                 try self.writer.writeAll("const result = ");
@@ -1974,7 +1974,7 @@ const Renderer = struct {
             "return_values";
 
         try self.writer.writeAll("{\n");
-        try self.renderSliceLenAsserts(command.params);
+        try self.renderSliceLenAsserts(name, command.params);
 
         if (returns.len == 1) {
             try self.writer.writeAll("var ");
@@ -2090,7 +2090,7 @@ const Renderer = struct {
         try self.renderAllocWrapperPrototype(name, params, returns_vk_result, data_type, "", .wrapper);
 
         try self.writer.writeAll("{\n");
-        try self.renderSliceLenAsserts(params);
+        try self.renderSliceLenAsserts(wrapped_name, params);
         try self.writer.writeAll("    var count: ");
         try self.renderTypeInfo(count_type);
         try self.writer.writeAll(" = undefined;\n");
@@ -2270,34 +2270,68 @@ const Renderer = struct {
         return true;
     }
 
-    fn renderSliceLenAsserts(self: *Self, params: []const reg.Command.Param) !void {
+    // NOTE: if multiple buffer args are linked to a single count parameter and they are all optional (this never happens in the vulkan spec yet)
+    // the generated assertions will not be exhaustive
+    fn renderSliceLenAsserts(self: *Self, function_name: []const u8, params: []const reg.Command.Param) !void {
         for (params) |len_param| {
             if ((try self.classifyParam(params, len_param)) != .buffer_len) continue;
-            const ref = (try self.findRefSliceParam(params, len_param.name)) orelse continue;
 
-            for (params, 0..) |other, i| {
-                if (i == ref.idx) continue;
-                if ((try self.classifyParam(params, other)) != .slice) continue;
-                if (!mem.eql(u8, other.param_type.pointer.size.other_field, len_param.name)) continue;
+            const ref_result = (try self.findRefSliceParam(params, len_param.name)) orelse continue;
+            const ref_slice = ref_result.param;
+            const ref_slice_opt = ref_slice.param_type.pointer.is_optional;
+            const len_param_kept = !try self.shouldSkipLen(function_name, params, len_param);
 
-                const ref_opt = ref.param.param_type.pointer.is_optional;
-                const other_opt = other.param_type.pointer.is_optional;
+            const ref_param, const ref_is_slice, const ref_is_opt = switch (ref_slice_opt) {
+                false => .{ ref_slice, true, false },
+                true => switch (len_param_kept) {
+                    true => .{ len_param, false, false },
+                    false => .{ ref_slice, true, true },
+                },
+            };
+
+            for (params) |other| {
+                const other_class = try self.classifyParam(params, other);
+                switch (other_class) {
+                    .slice => {
+                        if (!mem.eql(u8, other.param_type.pointer.size.other_field, len_param.name)) continue;
+                        if (ref_is_slice and mem.eql(u8, other.name, ref_param.name)) continue;
+                    },
+                    .buffer_len => {
+                        if (!mem.eql(u8, other.name, len_param.name)) continue;
+                        if (!ref_is_slice) continue;
+                        if (try self.shouldSkipLen(function_name, params, other)) continue;
+                    },
+                    else => continue,
+                }
+
+                const other_is_slice = other_class == .slice;
+                const other_opt = if (other_is_slice) other.param_type.pointer.is_optional else false;
 
                 try self.writer.writeAll("std.debug.assert(");
-                if (ref_opt) {
-                    try self.renderParamName(ref.param.name);
+                if (ref_is_opt) {
+                    try self.renderParamName(ref_param.name);
                     try self.writer.writeAll(" == null or ");
                 }
                 if (other_opt) {
                     try self.renderParamName(other.name);
                     try self.writer.writeAll(" == null or ");
                 }
-                try self.renderParamName(ref.param.name);
-                if (ref_opt) try self.writer.writeAll(".?");
-                try self.writer.writeAll(".len == ");
+
+                try self.renderParamName(ref_param.name);
+                if (ref_is_slice) {
+                    if (ref_is_opt) try self.writer.writeAll(".?");
+                    try self.writer.writeAll(".len");
+                }
+
+                try self.writer.writeAll(" == ");
+
                 try self.renderParamName(other.name);
-                if (other_opt) try self.writer.writeAll(".?");
-                try self.writer.writeAll(".len);\n");
+                if (other_is_slice) {
+                    if (other_opt) try self.writer.writeAll(".?");
+                    try self.writer.writeAll(".len");
+                }
+
+                try self.writer.writeAll(");\n");
             }
         }
     }
