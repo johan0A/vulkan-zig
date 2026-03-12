@@ -1286,9 +1286,9 @@ const Renderer = struct {
             try self.writer.writeAll("pub const ");
             try self.renderName(name);
             try self.writer.print(
-                \\ = packed struct {{
+                \\ = packed struct({s}) {{
                 \\_reserved_bits: {s} = 0,
-            , .{flags_type});
+            , .{ flags_type, flags_type });
             try self.renderFlagFunctions(name, "FlagsMixin", flag_functions, null);
             try self.writer.writeAll("};\n");
         }
